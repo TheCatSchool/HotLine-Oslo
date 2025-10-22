@@ -1,0 +1,233 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>HM-style prototype</title>
+<style>
+  html,body { height:100%; margin:0; background:#111; display:flex; align-items:center; justify-content:center; }
+  canvas { image-rendering: pixelated; background:#1a1a1a; width: 960px; height: 540px; } /* scaled */
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="270"></canvas>
+<script>
+// --- Config
+const CANVAS = document.getElementById('c');
+const ctx = CANVAS.getContext('2d');
+const SCALE = 2; // UI-scale in CSS
+const TILE = 16;
+const MAP_W = 30, MAP_H = 17;
+
+// --- Simple tilemap: 0 = empty, 1 = wall
+const map = [
+  // 30 columns per row; 17 rows. Use 1 border and some interior walls.
+];
+for(let y=0;y<MAP_H;y++){
+  let row = [];
+  for(let x=0;x<MAP_W;x++){
+    if(y===0 || y===MAP_H-1 || x===0 || x===MAP_W-1) row.push(1);
+    else if ((x===10 && y>3 && y<13) || (y===8 && x>12 && x<22 && x!==16)) row.push(1);
+    else row.push(0);
+  }
+  map.push(row);
+}
+
+// --- Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// --- Helper functions
+function rectsIntersect(a,b){
+  return !(a.x+a.w<=b.x || a.x>=b.x+b.w || a.y+a.h<=b.y || a.y>=b.y+b.h);
+}
+function tileAt(px,py){
+  const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return 1;
+  return map[ty][tx];
+}
+
+// --- Player
+const player = {
+  x: TILE*3 + 2, y: TILE*3 + 2, w:12, h:12,
+  speed: 160,
+  facing: {x:1,y:0}, // unit vector
+  attackCooldown: 0,
+  update(dt){
+    let vx = 0, vy = 0;
+    if(keys['w']||keys['arrowup']) vy -= 1;
+    if(keys['s']||keys['arrowdown']) vy += 1;
+    if(keys['a']||keys['arrowleft']) vx -= 1;
+    if(keys['d']||keys['arrowright']) vx += 1;
+    // normalize
+    if(vx!==0 || vy!==0){
+      const len = Math.hypot(vx,vy);
+      vx /= len; vy /= len;
+      this.facing.x = vx; this.facing.y = vy;
+    }
+    // move with collision (AABB sweep)
+    const px = this.x + vx*this.speed*dt;
+    if(!tileCollides(px, this.y, this.w, this.h)) this.x = px;
+    const py = this.y + vy*this.speed*dt;
+    if(!tileCollides(this.x, py, this.w, this.h)) this.y = py;
+
+    // attack
+    this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+    if(keys[' ']) { // space to attack
+      if(this.attackCooldown === 0){
+        this.attackCooldown = 0.25;
+        meleeAttack(this);
+      }
+    }
+  },
+  draw(ctx){
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillRect(this.x, this.y, this.w, this.h);
+    // facing marker
+    ctx.fillStyle = '#000';
+    ctx.fillRect(this.x + (this.w/2 + this.facing.x*6) - 2, this.y + (this.h/2 + this.facing.y*6) - 2, 4, 4);
+  }
+};
+
+// --- tile collision test for an AABB against tilemap
+function tileCollides(x,y,w,h){
+  const minX = Math.floor(x / TILE), minY = Math.floor(y / TILE);
+  const maxX = Math.floor((x + w - 0.001) / TILE), maxY = Math.floor((y + h - 0.001) / TILE);
+  for(let ty=minY; ty<=maxY; ty++){
+    for(let tx=minX; tx<=maxX; tx++){
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return true;
+      if(map[ty][tx] === 1) return true;
+    }
+  }
+  return false;
+}
+
+// --- Enemies
+const enemies = [];
+function spawnEnemy(x,y){
+  enemies.push({
+    x, y, w:12, h:12, speed: 90,
+    state: 'idle', // idle, chase
+    alertTimer: 0,
+    update(dt){
+      // simple LOS: if player in straight line with no walls, chase
+      const dx = player.x - this.x, dy = player.y - this.y;
+      const dist = Math.hypot(dx,dy);
+      const dirx = dx/dist, diry = dy/dist;
+      const los = hasLOS(this.x+this.w/2, this.y+this.h/2, player.x+player.w/2, player.y+player.h/2);
+      if(los && dist < 180) {
+        this.state = 'chase';
+        this.alertTimer = 2;
+      } else {
+        this.alertTimer = Math.max(0, this.alertTimer - dt);
+        if(this.alertTimer === 0) this.state = 'idle';
+      }
+
+      if(this.state === 'chase'){
+        // simple steering towards player, with collision
+        const vx = dirx * this.speed * dt;
+        const vy = diry * this.speed * dt;
+        if(!tileCollides(this.x + vx, this.y, this.w, this.h)) this.x += vx;
+        if(!tileCollides(this.x, this.y + vy, this.w, this.h)) this.y += vy;
+      }
+      // simple collision with player: if overlap, player dies (reset)
+      if(rectsIntersect(this, player)){
+        // death: reset player position
+        player.x = TILE*3 + 2; player.y = TILE*3 + 2;
+      }
+    },
+    draw(ctx){
+      ctx.fillStyle = '#ff4d4d';
+      ctx.fillRect(this.x, this.y, this.w, this.h);
+    }
+  });
+}
+
+// simple LOS sampling (step along line and check for wall)
+function hasLOS(x0,y0,x1,y1){
+  const steps = Math.ceil(Math.hypot(x1-x0,y1-y0)/8);
+  for(let i=0;i<=steps;i++){
+    const t = i/steps;
+    const x = x0 + (x1-x0)*t;
+    const y = y0 + (y1-y0)*t;
+    if(tileAt(x,y)===1) return false;
+  }
+  return true;
+}
+
+// --- melee: create a brief attack rect and test enemies
+function meleeAttack(source){
+  // attack rect in front of player
+  const cx = source.x + source.w/2, cy = source.y + source.h/2;
+  const arcW = 22, arcH = 22;
+  const ax = cx + source.facing.x * (arcW/2) - arcW/2;
+  const ay = cy + source.facing.y * (arcH/2) - arcH/2;
+  const atk = {x: ax, y: ay, w: arcW, h: arcH};
+  // check enemies
+  for(let i=enemies.length-1;i>=0;i--){
+    if(rectsIntersect(atk, enemies[i])){
+      enemies.splice(i,1);
+    }
+  }
+  // visual particle (simple)
+  particles.push({x:cx, y:cy, life:0.12});
+}
+
+// --- particles (tiny)
+const particles = [];
+
+// --- spawn some enemies
+spawnEnemy(TILE*18, TILE*5 + 2);
+spawnEnemy(TILE*20, TILE*11 + 2);
+
+// --- Main loop
+let last = performance.now();
+function frame(ts){
+  const dt = Math.min(0.05, (ts - last) / 1000);
+  last = ts;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+function update(dt){
+  player.update(dt);
+  for(const e of enemies) e.update(dt);
+  for(let i=particles.length-1;i>=0;i--){
+    particles[i].life -= dt;
+    if(particles[i].life <= 0) particles.splice(i,1);
+  }
+}
+function render(){
+  // clear
+  ctx.clearRect(0,0,CANVAS.width, CANVAS.height);
+  // draw tiles
+  for(let y=0;y<MAP_H;y++){
+    for(let x=0;x<MAP_W;x++){
+      if(map[y][x]===1){
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+      } else {
+        // floor
+        ctx.fillStyle = '#141414';
+        ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+      }
+    }
+  }
+  // draw entities
+  for(const p of particles){
+    ctx.fillStyle = 'rgba(255,0,0,0.9)';
+    ctx.fillRect(p.x-2, p.y-2, 4, 4);
+  }
+  for(const e of enemies) e.draw(ctx);
+  player.draw(ctx);
+
+  // HUD
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px sans-serif';
+  ctx.fillText('WASD/arrows move • SPACE melee', 6, 12);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
